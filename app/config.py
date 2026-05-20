@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     chunk_size: int = 900
     chunk_overlap: int = 150
-    max_context_tokens: int = 3500
+    max_context_tokens: int = Field(default=8000, validation_alias="MAX_CONTEXT_TOKENS")
     default_top_k: int = 5
 
     llm_provider: str = Field(default="ollama", validation_alias="LLM_PROVIDER")

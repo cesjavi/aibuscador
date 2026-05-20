@@ -36,6 +36,7 @@ def query_terms(question: str) -> list[str]:
     stopwords = {
         "como",
         "para",
+        "partir",
         "por",
         "con",
         "los",
@@ -45,6 +46,8 @@ def query_terms(question: str) -> list[str]:
         "que",
         "del",
         "actualizar",
+        "obtener",
+        "obtengo",
         "hacer",
         "esta",
         "este",
@@ -64,17 +67,32 @@ def lexical_search_chunks(db: Session, workspace_id: int, question: str, limit: 
         .filter(Document.workspace_id == workspace_id)
         .all()
     )
-    scored: list[tuple[int, Chunk]] = []
+    normalized_candidates: list[tuple[Chunk, str]] = []
+    document_frequency = {term: 0 for term in terms}
 
     for chunk in candidates:
         document = chunk.document
         haystack = normalize_for_search(
             f"{document.name}\n{document.source}\n{document.file_type}\n{chunk.content}"
         )
-        score = 0
+        normalized_candidates.append((chunk, haystack))
         for term in terms:
             if term in haystack:
-                score += 1 + haystack.count(term)
+                document_frequency[term] += 1
+
+    scored: list[tuple[float, Chunk]] = []
+    total_candidates = max(1, len(normalized_candidates))
+
+    for chunk, haystack in normalized_candidates:
+        score = 0.0
+        for term in terms:
+            count = haystack.count(term)
+            if not count:
+                continue
+
+            rarity_weight = total_candidates / max(1, document_frequency[term])
+            length_weight = 1.8 if len(term) >= 7 else 1.0
+            score += (1 + count) * rarity_weight * length_weight
         if phrase and phrase in haystack:
             score += 10
         if score:
@@ -185,7 +203,8 @@ async def answer_question(db: Session, workspace_id: int, question: str, top_k: 
         raise ValueError("Workspace no encontrado.")
 
     vector_store = get_vector_store()
-    logger.info("RAG query workspace_id=%s top_k=%s question=%r", workspace_id, top_k, question)
+    terms = query_terms(question)
+    logger.info("RAG query workspace_id=%s top_k=%s terms=%s question=%r", workspace_id, top_k, terms, question)
     query_embedding = embed_query(question)
     result_limit = top_k or settings.default_top_k
     vector_matches = vector_store.search(query_embedding, result_limit, workspace_id=workspace_id)
