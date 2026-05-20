@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+app/venv/
+app/.venv/
+
+# Environment files
+.env
+app/.env
+
+# Local RAG storage
+app/storage/rag.db
+app/storage/chroma/*
+app/storage/uploads/*
+!app/storage/chroma/.gitkeep
+!app/storage/uploads/.gitkeep
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

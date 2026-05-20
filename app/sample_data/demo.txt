@@ -1,0 +1,7 @@
+La empresa Alfa vende software de gestión para comercios minoristas.
+Durante 2024 aumentó su base de clientes en la región centro y redujo el tiempo promedio de soporte.
+Los temas más repetidos en los reportes internos son automatización, control de stock, facturación y soporte.
+
+El equipo detectó que algunos clientes todavía cargan inventario de forma manual.
+Una conclusión posible es que conviene priorizar integraciones con proveedores y mejoras en importación de datos.
+También faltan datos de satisfacción por segmento de cliente para evaluar el impacto de las mejoras.
