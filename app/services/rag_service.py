@@ -52,7 +52,31 @@ def query_terms(question: str) -> list[str]:
         "esta",
         "este",
     }
-    return [term for term in terms if term not in stopwords]
+    filtered_terms = [term for term in terms if term not in stopwords]
+    return expand_query_terms(filtered_terms)
+
+
+def expand_query_terms(terms: list[str]) -> list[str]:
+    expansions = {
+        "subcliente": ["idsubcliente", "subclientes"],
+        "subclientes": ["subcliente", "idsubcliente"],
+        "expendedora": ["expendedor", "expendedoras", "expendedores"],
+        "expendedoras": ["expendedora", "expendedor", "expendedores"],
+        "expendedor": ["expendedora", "expendedores", "expendedoras"],
+        "expendedores": ["expendedor", "expendedora", "expendedoras"],
+    }
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    for term in terms:
+        related_terms = [term, *expansions.get(term, [])]
+        for related_term in related_terms:
+            if related_term in seen:
+                continue
+            seen.add(related_term)
+            expanded.append(related_term)
+
+    return expanded
 
 
 def lexical_search_chunks(db: Session, workspace_id: int, question: str, limit: int) -> list[dict]:
@@ -72,6 +96,9 @@ def lexical_search_chunks(db: Session, workspace_id: int, question: str, limit: 
 
     for chunk in candidates:
         document = chunk.document
+        if document is None or document.workspace is None:
+            logger.warning("Skipping orphan chunk during lexical search chunk_id=%s", chunk.id)
+            continue
         haystack = normalize_for_search(
             f"{document.name}\n{document.source}\n{document.file_type}\n{chunk.content}"
         )
@@ -101,25 +128,85 @@ def lexical_search_chunks(db: Session, workspace_id: int, question: str, limit: 
     scored.sort(key=lambda item: (item[0], item[1].document.created_at, item[1].id), reverse=True)
     results: list[dict] = []
     for score, chunk in scored[:limit]:
-        document = chunk.document
-        results.append(
-            {
-                "id": chunk.vector_id,
-                "text": chunk.content,
-                "metadata": {
-                    "document_id": document.id,
-                    "workspace_id": document.workspace_id,
-                    "workspace_name": document.workspace.name,
-                    "document_name": document.name,
-                    "chunk_index": chunk.chunk_index,
-                    "source": document.source,
-                    "file_type": document.file_type,
-                },
-                "distance": None,
-                "lexical_score": score,
-            }
-        )
+        match = chunk_to_match(chunk, lexical_score=score)
+        if match is not None:
+            results.append(match)
     return results
+
+
+def chunk_to_match(chunk: Chunk, distance: float | None = None, lexical_score: float | None = None) -> dict | None:
+    document = chunk.document
+    if document is None or document.workspace is None:
+        logger.warning("Skipping orphan chunk chunk_id=%s document_id=%s", chunk.id, chunk.document_id)
+        return None
+    return {
+        "id": chunk.vector_id,
+        "text": chunk.content,
+        "metadata": {
+            "document_id": document.id,
+            "workspace_id": document.workspace_id,
+            "workspace_name": document.workspace.name,
+            "document_name": document.name,
+            "chunk_index": chunk.chunk_index,
+            "source": document.source,
+            "file_type": document.file_type,
+        },
+        "distance": distance,
+        "lexical_score": lexical_score,
+    }
+
+
+def match_exists_in_workspace(db: Session, match: dict, workspace_id: int) -> bool:
+    metadata = match.get("metadata") or {}
+    document_id = metadata.get("document_id")
+    chunk_index = metadata.get("chunk_index")
+    if document_id is None or chunk_index is None:
+        return False
+
+    return (
+        db.query(Chunk.id)
+        .join(Document)
+        .filter(
+            Document.id == document_id,
+            Document.workspace_id == workspace_id,
+            Chunk.chunk_index == chunk_index,
+        )
+        .first()
+        is not None
+    )
+
+
+def expand_matches_with_neighbor_chunks(db: Session, matches: list[dict]) -> list[dict]:
+    expanded: list[dict] = []
+    seen: set[str] = set()
+
+    for match in matches:
+        match_id = match["id"]
+        if match_id not in seen:
+            seen.add(match_id)
+            expanded.append(match)
+
+        metadata = match["metadata"]
+        document_id = metadata["document_id"]
+        chunk_index = metadata["chunk_index"]
+        neighbor_chunks = (
+            db.query(Chunk)
+            .filter(
+                Chunk.document_id == document_id,
+                Chunk.chunk_index.in_([chunk_index - 1, chunk_index + 1]),
+            )
+            .order_by(Chunk.chunk_index.asc())
+            .all()
+        )
+        for neighbor_chunk in neighbor_chunks:
+            if neighbor_chunk.vector_id in seen:
+                continue
+            seen.add(neighbor_chunk.vector_id)
+            neighbor_match = chunk_to_match(neighbor_chunk)
+            if neighbor_match is not None:
+                expanded.append(neighbor_match)
+
+    return expanded
 
 
 def ingest_document(
@@ -207,14 +294,21 @@ async def answer_question(db: Session, workspace_id: int, question: str, top_k: 
     logger.info("RAG query workspace_id=%s top_k=%s terms=%s question=%r", workspace_id, top_k, terms, question)
     query_embedding = embed_query(question)
     result_limit = top_k or settings.default_top_k
-    vector_matches = vector_store.search(query_embedding, result_limit, workspace_id=workspace_id)
-    lexical_matches = lexical_search_chunks(db, workspace_id, question, result_limit)
-    matches = merge_retrieval_results(lexical_matches, vector_matches)
+    retrieval_limit = min(30, max(result_limit, result_limit * 4, 8))
+    vector_matches = vector_store.search(query_embedding, retrieval_limit, workspace_id=workspace_id)
+    lexical_matches = lexical_search_chunks(db, workspace_id, question, retrieval_limit)
+    merged_matches = merge_retrieval_results(lexical_matches, vector_matches)
+    valid_matches = [match for match in merged_matches if match_exists_in_workspace(db, match, workspace_id)]
+    stale_matches = len(merged_matches) - len(valid_matches)
+    if stale_matches:
+        logger.warning("RAG skipped stale vector/db matches workspace_id=%s count=%s", workspace_id, stale_matches)
+    matches = expand_matches_with_neighbor_chunks(db, valid_matches)
     logger.info(
-        "RAG retrieval workspace_id=%s lexical_matches=%s vector_matches=%s merged=%s",
+        "RAG retrieval workspace_id=%s lexical_matches=%s vector_matches=%s valid=%s expanded=%s",
         workspace_id,
         len(lexical_matches),
         len(vector_matches),
+        len(valid_matches),
         len(matches),
     )
 

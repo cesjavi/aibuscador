@@ -51,17 +51,13 @@ async def upload_document(
             content=content,
         )
         return {"id": document.id, "name": document.name, "chunks": len(document.chunks)}
-    except DuplicateDocumentError as exc:
-        if path:
-            path.unlink(missing_ok=True)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        if path:
-            path.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         if path:
             path.unlink(missing_ok=True)
+        if isinstance(exc, DuplicateDocumentError):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if isinstance(exc, ValueError):
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         raise HTTPException(status_code=500, detail=f"Error al procesar documento: {exc}") from exc
 
 
